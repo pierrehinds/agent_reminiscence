@@ -1,0 +1,3 @@
+# Fixtures are deliberately odd Python used to assert resolver behaviour.
+# They are test data, not code anyone navigates.
+tests/fixtures/*

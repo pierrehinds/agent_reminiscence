@@ -1,0 +1,5 @@
+.reminiscence/.dirty
+.reminiscence/.graph.json
+.reminiscence/.stop_state
+__pycache__/
+*.pyc
