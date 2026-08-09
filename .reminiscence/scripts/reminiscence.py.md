@@ -1,6 +1,6 @@
 ---
 source: scripts/reminiscence.py
-source_sha: bd0dddbda079dc5ef71a2bc7d8f4e07e9dc984dc
+source_sha: af351b5245b8f3952123c8f628b482830636fa1b
 filled_by: main
 updated: 2026-08-09
 ---
@@ -33,6 +33,12 @@ notes contain. `to_scope` / `to_repo` are the only sanctioned crossings.
 
 `map` always recomputes the whole graph and writes only notes whose content
 changed, so callers get minimal diffs without an incremental code path.
+
+`scope_prefix(creating=...)` is the sharp edge. Falling back to the repo root
+when no mirror is found is only safe while creating one; for any other verb it
+invents a whole-repo scope, and `map` run from the root of a scoped monorepo
+would then scaffold a second mirror over every package. Non-creating callers
+adopt a lone existing mirror instead, and refuse when there are several.
 
 ## Why it's like this
 Incremental mapping was rejected. Editing A's imports changes B's `Used by`,

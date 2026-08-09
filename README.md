@@ -72,6 +72,10 @@ spent a turn editing `menu.py` knows things no cold pass can reconstruct.
 /reminiscence               # detect state, run the per-turn workflow
 ```
 
+Then just work. A `PostToolUse` hook records what you edit; a `Stop` hook
+re-maps the graph silently and asks for prose only on files you touched. That
+loop is how coverage grows.
+
 ## Monorepos
 
 The mirror is created wherever you run `init`, and every later command finds it
@@ -80,8 +84,13 @@ is just where your terminal is:
 
 ```bash
 cd services/api && /reminiscence init    # covers services/api only
-/reminiscence init --scope libs/shared   # or name the folder explicitly
+/reminiscence init libs/shared           # or name the folder explicitly
 ```
+
+Later commands find that mirror by walking up from wherever you are. If none
+sits above you, a single mirror elsewhere in the repo is used automatically;
+several will refuse and list themselves rather than guess and scaffold a
+surprise second mirror over the whole tree.
 
 Several mirrors can coexist. The important part is that **coverage is scoped but
 graph visibility is not** — the resolver always indexes the whole repository, so
@@ -108,10 +117,6 @@ implementation and it silently destroys exactly this; `tests/test_scoping.py`
 asserts against it.
 
 All paths inside a note are relative to that mirror's root.
-
-Then just work. A `PostToolUse` hook records what you edit; a `Stop` hook
-re-maps the graph silently and asks for prose only on files you touched. That
-loop is how coverage grows.
 
 ## Staleness
 
@@ -163,20 +168,25 @@ scripts/extractors/python.py ast parse + import resolution
 hooks/                       post_tool_use.py, stop.py
 references/                  note-format, fill-guide, graph-resolution,
                              comment-policy, setup
-tests/                       fixtures + exact edge-set assertions
+tests/                       fixtures, edge-set assertions, scoping tests
 ```
 
 ## Tests
 
 ```bash
-python3 tests/test_extractor.py
+python3 tests/test_extractor.py    # graph correctness
+python3 tests/test_scoping.py      # monorepo scoping, end-to-end
 ```
 
-Asserts the exact edge set for a `src/` layout and a flat layout, covering
+`test_extractor.py` asserts the exact edge set for a `src/` layout and a flat layout, covering
 level-3 relative imports, `__init__.py` re-exports, the `from a.b import c`
 module-vs-symbol ambiguity, `__all__` present and absent, and a circular import.
 It also asserts that inversion is **total** — `A uses B` ⟺ `B used-by A` — since
 a graph that loses back-edges silently degrades traversal into search.
+
+`test_scoping.py` builds a throwaway monorepo and asserts the invariant the
+feature rests on: coverage scoped, visibility repo-wide, cross-scope edges
+intact, and no surprise second mirror when a command runs from the repo root.
 
 ## Limits
 

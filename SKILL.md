@@ -75,17 +75,19 @@ directory, and a gitignore entry for the scratch file. Structure only, no
 content.
 
 ```bash
-python3 "$REM" scaffold                        # scope = the user's cwd
-python3 "$REM" scaffold --scope services/api   # scope = an explicit folder
+python3 "$REM" scaffold                 # scope = the user's cwd
+python3 "$REM" scaffold services/api    # scope = an explicit folder
 ```
 
 **The scope is the folder the mirror is created in**, defaulting to the working
-directory. Pass the user's folder argument through as `--scope`. Report the
-scope back to them — in a monorepo, getting this wrong means scaffolding
-thousands of notes for packages they did not ask about.
+directory. Pass the user's folder argument straight through. Always report the
+resulting scope back to them — in a monorepo, getting this wrong means
+scaffolding thousands of notes for packages they did not ask about.
 
 Every other verb finds its scope by walking up from the cwd to the nearest
 `.reminiscence/`, the way git finds `.git`. Pass `--scope <folder>` to override.
+If no mirror sits above the cwd, a single mirror elsewhere in the repo is used
+automatically; several will refuse and list themselves rather than guess.
 
 ### `map`
 Populate every generated region from the import graph, and rebuild

@@ -72,31 +72,50 @@ def repo_root() -> str:
         sys.exit("reminiscence: not inside a git repository")
 
 
-def scope_prefix(root: str, explicit: str | None = None) -> str:
+def scope_prefix(root: str, explicit: str | None = None, *, creating: bool = False) -> str:
     """Repo-relative prefix of the covered subtree; '' means the whole repo.
 
     Without an explicit path this walks up from the working directory looking
     for the nearest `.reminiscence/`, the way git finds `.git`. That makes the
     terminal's location the default scope, so a monorepo can carry one mirror
     per package without any configuration.
+
+    Falling back to the repo root when no mirror is found is only safe while
+    *creating* one. For every other verb that fallback silently invents a
+    whole-repo scope — running `map` from the root of a monorepo scoped to one
+    package would scaffold a second mirror over every package in the tree.
     """
     if explicit is not None:
-        target = os.path.abspath(explicit)
-    else:
-        cursor = os.path.abspath(os.getcwd())
-        target = root
-        while True:
-            if os.path.isdir(os.path.join(cursor, MIRROR)):
-                target = cursor
-                break
-            if cursor == root or cursor == os.path.dirname(cursor):
-                break
-            cursor = os.path.dirname(cursor)
+        rel = os.path.relpath(os.path.abspath(explicit), root).replace(os.sep, "/")
+        if rel.startswith(".."):
+            sys.exit(f"reminiscence: {explicit} is outside the repository")
+        return "" if rel == "." else rel
 
-    rel = os.path.relpath(target, root).replace(os.sep, "/")
-    if rel.startswith(".."):
-        sys.exit(f"reminiscence: {explicit} is outside the repository")
-    return "" if rel == "." else rel
+    cursor = os.path.abspath(os.getcwd())
+    while True:
+        if os.path.isdir(os.path.join(cursor, MIRROR)):
+            rel = os.path.relpath(cursor, root).replace(os.sep, "/")
+            return "" if rel == "." else rel
+        if cursor == root or cursor == os.path.dirname(cursor):
+            break
+        cursor = os.path.dirname(cursor)
+
+    if creating:
+        return ""
+
+    existing = other_mirrors(root)
+    if len(existing) == 1:
+        return existing[0]
+    if not existing:
+        sys.exit(
+            "reminiscence: no mirror found at or above this directory.\n"
+            "  run `reminiscence init` here, or `init --scope <folder>`"
+        )
+    listed = "\n".join(f"    {m or '(repo root)'}" for m in existing)
+    sys.exit(
+        "reminiscence: several mirrors in this repo and none above the working "
+        f"directory:\n{listed}\n  pass --scope <folder>, or cd into one"
+    )
 
 
 def scope_for_path(root: str, repo_rel: str) -> str | None:
@@ -520,7 +539,8 @@ def cmd_sources(args) -> int:
 
 def cmd_scaffold(args) -> int:
     root = repo_root()
-    prefix = scope_prefix(root, args.scope if args.scope else os.getcwd())
+    where = args.folder or args.scope or os.getcwd()
+    prefix = scope_prefix(root, where, creating=True)
     srcs = sources(root, prefix)
     created = 0
 
@@ -772,7 +792,10 @@ def main() -> int:
 
     p = add("path"); p.add_argument("source"); p.set_defaults(fn=cmd_path)
     p = add("sources"); p.set_defaults(fn=cmd_sources)
-    p = add("scaffold"); p.set_defaults(fn=cmd_scaffold)
+    p = add("scaffold")
+    p.add_argument("folder", nargs="?", default=None,
+                   help="folder to cover (default: cwd); same as --scope")
+    p.set_defaults(fn=cmd_scaffold)
     p = add("map"); p.add_argument("paths", nargs="*"); p.set_defaults(fn=cmd_map)
     p = add("unfilled"); p.add_argument("--dirs", action="store_true"); p.set_defaults(fn=cmd_unfilled)
     p = add("verify")

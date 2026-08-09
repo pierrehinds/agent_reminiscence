@@ -1,6 +1,6 @@
 ---
 source: tests/test_scoping.py
-source_sha: d280a23b6d14dca2b4bb3aa2cdf1caa9bfff3b32
+source_sha: d734105b66ba2f995c0119fb52d629bbe4ffae2c
 filled_by: main
 updated: 2026-08-09
 ---
@@ -43,6 +43,10 @@ Asserts `External` is `—` for a cross-scope import, not merely that the edge i
 present. Scoping the resolver alongside the coverage is the obvious
 implementation and it fails exactly here: the edge silently becomes a bare
 `External: shared` string and the link is lost.
+
+Also pins the repo-root case: running a non-creating verb from the root must
+never mint a new mirror, and an ambiguous scope must exit non-zero with the
+candidates listed rather than pick one.
 
 ## Related
 —

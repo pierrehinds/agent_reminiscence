@@ -82,6 +82,17 @@ def read(path: str) -> str:
         return handle.read()
 
 
+def _find_mirrors(root: str) -> list[str]:
+    found = []
+    for dirpath, dirs, _files in os.walk(root):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        if ".reminiscence" in dirs:
+            found.append(os.path.join(dirpath, ".reminiscence"))
+            dirs.remove(".reminiscence")
+    return found
+
+
 def main() -> int:
     root = tempfile.mkdtemp(prefix="reminiscence-scope-")
     try:
@@ -138,6 +149,31 @@ def main() -> int:
         run(root, api, "map")
         check("map is idempotent under scoping",
               read(os.path.join(mirror, "src", "app", "main.py.md")), before)
+
+        # Running a non-creating verb from the repo root must never invent a
+        # whole-repo scope. Falling back to the root here silently scaffolds a
+        # second mirror over every package in the tree.
+        run(root, root, "map", "--scope", "services/api")
+        mirrors = sorted(
+            os.path.relpath(os.path.dirname(d), root)
+            for d in _find_mirrors(root)
+        )
+        check("no mirror invented at the repo root",
+              mirrors, ["libs/shared", "services/api"])
+
+        # With several mirrors and none above cwd, guessing is worse than
+        # refusing — the user gets a list instead of a surprise.
+        out = subprocess.run(
+            [sys.executable, CLI, "map"], cwd=root, capture_output=True, text=True)
+        check("ambiguous scope exits non-zero", out.returncode, 1)
+        contains("ambiguous scope lists the candidates", out.stderr, "libs/shared")
+        contains("ambiguous scope suggests the fix", out.stderr, "--scope")
+
+        # `init <folder>` positionally, the way a user would type it.
+        billing = os.path.join(root, "services", "billing")
+        run(root, root, "scaffold", "services/billing")
+        check("positional folder scaffolds there",
+              os.path.isdir(os.path.join(billing, ".reminiscence")), True)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
