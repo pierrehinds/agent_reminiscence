@@ -20,6 +20,12 @@ pre-resolved links to the files this one uses and the files that use it, so you
 traverse the codebase by following edges instead of guessing at import
 resolution.
 
+**All paths in a note are relative to that mirror's root** — the folder holding
+`.reminiscence/`. In a single-package repo that is the repo root and paths look
+repo-relative. In a monorepo scoped to `services/api`, a note may point at
+`../../libs/shared/log.py`; that is a real file that simply has no note. Read
+the source directly.
+
 ---
 
 ## Before any command: resolve the script
@@ -63,17 +69,23 @@ by hand gets them wrong and they drift on the next edit.
 
 Parse the argument after `reminiscence`. No argument means bare invocation.
 
-### `init`
+### `init [<folder>]`
 Build the mirror: an empty skeleton note per source file, `_dir.md` per
-directory, and gitignore entries for the scratch files. Structure only, no
+directory, and a gitignore entry for the scratch file. Structure only, no
 content.
 
 ```bash
-python3 "$REM" scaffold
+python3 "$REM" scaffold                        # scope = the user's cwd
+python3 "$REM" scaffold --scope services/api   # scope = an explicit folder
 ```
 
-Then tell the user how many notes were created and that `map` is the free next
-step.
+**The scope is the folder the mirror is created in**, defaulting to the working
+directory. Pass the user's folder argument through as `--scope`. Report the
+scope back to them — in a monorepo, getting this wrong means scaffolding
+thousands of notes for packages they did not ask about.
+
+Every other verb finds its scope by walking up from the cwd to the nearest
+`.reminiscence/`, the way git finds `.git`. Pass `--scope <folder>` to override.
 
 ### `map`
 Populate every generated region from the import graph, and rebuild
@@ -123,6 +135,29 @@ mapped                -> run the per-turn workflow below
 
 **Never auto-launch a bulk `fill` from a bare invocation.** Partial prose is the
 expected steady state, not a defect. Report coverage and offer.
+
+**Before offering `init` in a large repo, check whether it is a monorepo.**
+`status` reports the scope it would use, and `scopes` lists mirrors that already
+exist. If the user is at the root of a monorepo, ask which package they want
+rather than scaffolding the whole tree.
+
+---
+
+## Monorepos
+
+Mirrors are per-scope and several can coexist. Each one covers the files beneath
+it; **the graph still sees the whole repository**, so an import that crosses a
+package boundary resolves to a real path rather than decaying into an
+`External` entry, and `Used by` still reports callers in packages that have no
+mirror at all. That last part is the breaking-change warning you actually want
+when editing a shared library.
+
+```bash
+python3 "$REM" scopes    # every mirror in this repo
+```
+
+Only scope down when the user asks. A single mirror at the repo root is correct
+for a normal repo and simpler for everyone.
 
 ---
 

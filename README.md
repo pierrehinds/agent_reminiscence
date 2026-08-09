@@ -72,6 +72,43 @@ spent a turn editing `menu.py` knows things no cold pass can reconstruct.
 /reminiscence               # detect state, run the per-turn workflow
 ```
 
+## Monorepos
+
+The mirror is created wherever you run `init`, and every later command finds it
+by walking up from your working directory — the way git finds `.git`. So scope
+is just where your terminal is:
+
+```bash
+cd services/api && /reminiscence init    # covers services/api only
+/reminiscence init --scope libs/shared   # or name the folder explicitly
+```
+
+Several mirrors can coexist. The important part is that **coverage is scoped but
+graph visibility is not** — the resolver always indexes the whole repository, so
+a note in `services/api` still points at
+
+```
+## Uses
+- ../../libs/shared/src/shared/log.py
+```
+
+a real, readable path rather than a dead `External: shared` entry. And
+`libs/shared`'s own note reports callers in *every* package, including ones with
+no mirror at all:
+
+```
+## Used by
+- ../../services/api/src/app/main.py
+- ../../services/billing/src/app/main.py
+```
+
+That is the monorepo question — *who breaks if I change this?* — answered from a
+precomputed graph. Scoping the resolver as well as the coverage is the obvious
+implementation and it silently destroys exactly this; `tests/test_scoping.py`
+asserts against it.
+
+All paths inside a note are relative to that mirror's root.
+
 Then just work. A `PostToolUse` hook records what you edit; a `Stop` hook
 re-maps the graph silently and asks for prose only on files you touched. That
 loop is how coverage grows.

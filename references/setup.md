@@ -21,13 +21,17 @@ python3 ~/.claude/skills/reminiscence/scripts/reminiscence.py scaffold
 python3 ~/.claude/skills/reminiscence/scripts/reminiscence.py map
 ```
 
-`scaffold` also appends the scratch files to `.gitignore`:
+`scaffold` also appends its one scratch file to `.gitignore`:
 
 ```
 .reminiscence/.dirty
-.reminiscence/.graph.json
-.reminiscence/.stop_state
 ```
+
+The graph cache and stop state are repo-wide rather than per-scope and live
+under `.git/`, so they need no ignore entry and can never be committed.
+
+To cover only part of a monorepo, run `init` from inside that package or pass
+`--scope <folder>`. See the Monorepos section of the README.
 
 **Commit `.reminiscence/` itself.** The notes are the point — they should travel
 with the repo and be reviewable in diffs.

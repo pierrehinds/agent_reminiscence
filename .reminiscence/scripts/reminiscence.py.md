@@ -1,6 +1,6 @@
 ---
 source: scripts/reminiscence.py
-source_sha: 3b7a91105a29614ecc2e6bd00f0b45fdffd4ecfd
+source_sha: bd0dddbda079dc5ef71a2bc7d8f4e07e9dc984dc
 filled_by: main
 updated: 2026-08-09
 ---
@@ -17,7 +17,7 @@ updated: 2026-08-09
 —
 
 ## Exports
-MIRROR, DIRTY, GRAPH_CACHE, INDEX, GEN_START, GEN_END, SOURCE_EXTS, DEFAULT_IGNORES, PROSE_SECTIONS, SLOP_OPENERS, repo_root, tracked_files, blob_sha, load_ignores, ignored, sources, note_path, dir_note_path, parse_note, render_note, split_generated, read_note, write_note, skeleton_body, build_graph, generated_block, cmd_path, cmd_sources, cmd_scaffold, cmd_map, skeleton_body_tail, write_index, collect_notes, audit, lint, cmd_verify, cmd_unfilled, topological, cmd_stamp, drop_dirty, cmd_dirty, cmd_status, cmd_prune, main
+MIRROR, GRAPH_CACHE, INDEX_NAME, GEN_START, GEN_END, SOURCE_EXTS, DEFAULT_IGNORES, PROSE_SECTIONS, SLOP_OPENERS, repo_root, scope_prefix, scope_for_path, in_scope, to_scope, to_repo, tracked_files, blob_sha, load_ignores, ignored, sources, visible_python, note_path, mirror_root, parse_note, render_note, split_generated, read_note, write_note, skeleton_tail, skeleton_body, build_graph, generated_block, rewrite_notes, write_index, collect_notes, audit, lint, resolve, cmd_path, cmd_sources, cmd_scaffold, cmd_map, cmd_verify, cmd_unfilled, topological, cmd_stamp, drop_dirty, cmd_dirty, cmd_status, other_mirrors, cmd_scopes, cmd_prune, main
 
 ## External
 __future__, argparse, datetime, fnmatch, hashlib, json, os, posixpath, subprocess, sys
@@ -27,7 +27,12 @@ __future__, argparse, datetime, fnmatch, hashlib, json, os, posixpath, subproces
 The only thing that writes the generated region of a note. Every skill verb is a thin wrapper over one of these subcommands.
 
 ## Interfaces
-`map` always recomputes the whole graph and writes only notes whose content changed. Callers get minimal diffs without an incremental code path to get wrong.
+Two path spaces, and confusing them is the easiest way to break this file:
+*repo-relative* is what git and the resolver speak, *scope-relative* is what
+notes contain. `to_scope` / `to_repo` are the only sanctioned crossings.
+
+`map` always recomputes the whole graph and writes only notes whose content
+changed, so callers get minimal diffs without an incremental code path.
 
 ## Why it's like this
 Incremental mapping was rejected. Editing A's imports changes B's `Used by`,

@@ -5,6 +5,11 @@ Nothing here calls a model. `map` owns the generated region of every note and
 rewrites it from the `ast` graph; everything else is bookkeeping over note
 frontmatter. The prose between the markers belongs to the fill step and is
 never touched by this script.
+
+Two path spaces, and confusing them is the easiest way to break this file:
+*repo-relative* is what git and the resolver speak, *scope-relative* is what
+notes contain and what an agent standing in the scope root can use directly.
+Conversion happens only at the note-rendering boundary.
 """
 
 from __future__ import annotations
@@ -24,9 +29,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from extractors import python as px  # noqa: E402
 
 MIRROR = ".reminiscence"
-DIRTY = f"{MIRROR}/.dirty"
-GRAPH_CACHE = f"{MIRROR}/.graph.json"
-INDEX = f"{MIRROR}/INDEX.md"
+# Repo-wide derived state, kept under .git/ so it is never mistaken for a
+# mirror by scope discovery and never needs gitignoring.
+GRAPH_CACHE = ".git/reminiscence.graph.json"
+INDEX_NAME = "INDEX.md"
 GEN_START = "<!-- reminiscence:generated:start -->"
 GEN_END = "<!-- reminiscence:generated:end -->"
 
@@ -52,7 +58,7 @@ SLOP_OPENERS = (
 
 
 # --------------------------------------------------------------------------
-# repo plumbing
+# repo and scope
 # --------------------------------------------------------------------------
 
 def repo_root() -> str:
@@ -66,6 +72,66 @@ def repo_root() -> str:
         sys.exit("reminiscence: not inside a git repository")
 
 
+def scope_prefix(root: str, explicit: str | None = None) -> str:
+    """Repo-relative prefix of the covered subtree; '' means the whole repo.
+
+    Without an explicit path this walks up from the working directory looking
+    for the nearest `.reminiscence/`, the way git finds `.git`. That makes the
+    terminal's location the default scope, so a monorepo can carry one mirror
+    per package without any configuration.
+    """
+    if explicit is not None:
+        target = os.path.abspath(explicit)
+    else:
+        cursor = os.path.abspath(os.getcwd())
+        target = root
+        while True:
+            if os.path.isdir(os.path.join(cursor, MIRROR)):
+                target = cursor
+                break
+            if cursor == root or cursor == os.path.dirname(cursor):
+                break
+            cursor = os.path.dirname(cursor)
+
+    rel = os.path.relpath(target, root).replace(os.sep, "/")
+    if rel.startswith(".."):
+        sys.exit(f"reminiscence: {explicit} is outside the repository")
+    return "" if rel == "." else rel
+
+
+def scope_for_path(root: str, repo_rel: str) -> str | None:
+    """Which mirror owns this file: nearest `.reminiscence/` at or above it.
+
+    Hooks must use this rather than the cwd — one session sitting at a monorepo
+    root can edit files belonging to several different mirrors in a single turn.
+    """
+    cursor = os.path.dirname(os.path.join(root, repo_rel))
+    while True:
+        if os.path.isdir(os.path.join(cursor, MIRROR)):
+            rel = os.path.relpath(cursor, root).replace(os.sep, "/")
+            return "" if rel == "." else rel
+        if cursor == root or cursor == os.path.dirname(cursor):
+            return None
+        cursor = os.path.dirname(cursor)
+
+
+def in_scope(path: str, prefix: str) -> bool:
+    return True if not prefix else path.startswith(f"{prefix}/")
+
+
+def to_scope(path: str, prefix: str) -> str:
+    """Repo-relative -> scope-relative. Outside the scope yields `../`."""
+    if not prefix:
+        return path
+    return posixpath.relpath(path, prefix)
+
+
+def to_repo(path: str, prefix: str) -> str:
+    if not prefix:
+        return posixpath.normpath(path)
+    return posixpath.normpath(posixpath.join(prefix, path))
+
+
 def tracked_files(root: str) -> list[str]:
     out = subprocess.run(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
@@ -76,19 +142,17 @@ def tracked_files(root: str) -> list[str]:
 
 def blob_sha(root: str, path: str) -> str | None:
     """Git's own blob hash, computed in-process to keep `map` subprocess-free."""
-    full = os.path.join(root, path)
     try:
-        with open(full, "rb") as handle:
+        with open(os.path.join(root, path), "rb") as handle:
             data = handle.read()
     except OSError:
         return None
-    header = f"blob {len(data)}\0".encode()
-    return hashlib.sha1(header + data).hexdigest()
+    return hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
 
 
-def load_ignores(root: str) -> list[str]:
+def load_ignores(root: str, prefix: str) -> list[str]:
     patterns = list(DEFAULT_IGNORES)
-    path = os.path.join(root, ".reminiscenceignore")
+    path = os.path.join(root, prefix, ".reminiscenceignore")
     if os.path.exists(path):
         with open(path, encoding="utf-8") as handle:
             for line in handle:
@@ -109,24 +173,42 @@ def ignored(path: str, patterns: list[str]) -> bool:
     return False
 
 
-def sources(root: str) -> list[str]:
-    patterns = load_ignores(root)
+def sources(root: str, prefix: str) -> list[str]:
+    """Repo-relative source files that get notes — the coverage scope."""
+    patterns = load_ignores(root, prefix)
     out = []
     for path in tracked_files(root):
         if posixpath.splitext(path)[1] not in SOURCE_EXTS:
             continue
-        if ignored(path, patterns):
+        if not in_scope(path, prefix):
+            continue
+        if ignored(to_scope(path, prefix), patterns):
             continue
         out.append(path)
     return out
 
 
-def note_path(source: str) -> str:
-    return f"{MIRROR}/{source}.md"
+def visible_python(root: str) -> list[str]:
+    """Every Python file in the repo — the graph's visibility, not its coverage.
+
+    Deliberately unscoped. A note in services/api must still resolve an import
+    of libs/shared to a real path; scoping this too is what turns a real edge
+    into a dead `External` string.
+    """
+    return [
+        p for p in tracked_files(root)
+        if posixpath.splitext(p)[1] in {".py", ".pyi"}
+        and not p.startswith(f"{MIRROR}/") and f"/{MIRROR}/" not in p
+    ]
 
 
-def dir_note_path(directory: str) -> str:
-    return posixpath.join(MIRROR, directory, "_dir.md") if directory else f"{MIRROR}/_dir.md"
+def note_path(source: str, prefix: str) -> str:
+    """Repo-relative path of the note for a repo-relative source path."""
+    return posixpath.join(prefix, MIRROR, to_scope(source, prefix)) + ".md"
+
+
+def mirror_root(prefix: str) -> str:
+    return posixpath.join(prefix, MIRROR) if prefix else MIRROR
 
 
 # --------------------------------------------------------------------------
@@ -155,7 +237,6 @@ def render_note(meta: dict[str, str], body: str) -> str:
 
 
 def split_generated(body: str) -> tuple[str, str, str]:
-    """Return (before, generated, after). Missing markers yield an empty middle."""
     start = body.find(GEN_START)
     if start == -1:
         return body, "", ""
@@ -187,17 +268,21 @@ def write_note(root: str, path: str, meta: dict[str, str], body: str) -> bool:
     return True
 
 
+def skeleton_tail() -> str:
+    return "\n\n".join(f"## {name}\n—" for name in PROSE_SECTIONS) + "\n"
+
+
 def skeleton_body() -> str:
-    sections = "\n\n".join(f"## {name}\n—" for name in PROSE_SECTIONS)
-    return f"\n{GEN_START}\n{GEN_END}\n\n{sections}\n"
+    return f"\n{GEN_START}\n{GEN_END}\n\n{skeleton_tail()}"
 
 
 # --------------------------------------------------------------------------
 # graph
 # --------------------------------------------------------------------------
 
-def build_graph(root: str, srcs: list[str], force: set[str] | None = None) -> dict:
-    py = [p for p in srcs if p.endswith((".py", ".pyi"))]
+def build_graph(root: str, force: set[str] | None = None) -> dict:
+    """Repo-wide graph, in repo-relative paths. Scoping happens at render time."""
+    py = visible_python(root)
     cache = {}
     cache_path = os.path.join(root, GRAPH_CACHE)
     if os.path.exists(cache_path):
@@ -244,18 +329,22 @@ def build_graph(root: str, srcs: list[str], force: set[str] | None = None) -> di
         uses[path] = res.uses
         external[path] = res.external
 
-    used_by: dict[str, list[str]] = {p: [] for p in srcs}
+    used_by: dict[str, list[str]] = {}
     for path, targets in uses.items():
         for target in targets:
             used_by.setdefault(target, []).append(path)
     for key in used_by:
         used_by[key] = sorted(set(used_by[key]))
 
-    exports = {p: facts[p].exports for p in facts}
-    return {"uses": uses, "used_by": used_by, "external": external, "exports": exports}
+    return {
+        "uses": uses,
+        "used_by": used_by,
+        "external": external,
+        "exports": {p: facts[p].exports for p in facts},
+    }
 
 
-def generated_block(source: str, graph: dict) -> str:
+def generated_block(source: str, graph: dict, prefix: str) -> str:
     uses = graph["uses"].get(source, [])
     used_by = graph["used_by"].get(source, [])
     exports = graph["exports"].get(source, [])
@@ -264,124 +353,46 @@ def generated_block(source: str, graph: dict) -> str:
     tests = [p for p in used_by if px.is_test_path(p)]
     callers = [p for p in used_by if not px.is_test_path(p)]
 
-    def block(title: str, items: list[str], inline: bool = False) -> str:
+    def block(title: str, items: list[str], inline: bool = False, scope: bool = False) -> str:
+        if scope:
+            items = [to_scope(i, prefix) for i in items]
         if not items:
             return f"## {title}\n—\n"
         if inline:
             return f"## {title}\n{', '.join(items)}\n"
-        listed = "\n".join(f"- {i}" for i in items)
-        return f"## {title}\n{listed}\n"
+        return f"## {title}\n" + "\n".join(f"- {i}" for i in items) + "\n"
 
     parts = [
-        block("Uses", uses),
-        block("Used by", callers),
-        block("Tested by", tests),
+        block("Uses", uses, scope=True),
+        block("Used by", callers, scope=True),
+        block("Tested by", tests, scope=True),
         block("Exports", exports, inline=True),
         block("External", external, inline=True),
     ]
     return "\n" + "\n".join(parts)
 
 
-# --------------------------------------------------------------------------
-# verbs
-# --------------------------------------------------------------------------
-
-def cmd_path(args) -> int:
-    print(note_path(args.source))
-    return 0
-
-
-def cmd_sources(args) -> int:
-    for path in sources(repo_root()):
-        print(path)
-    return 0
-
-
-def cmd_scaffold(args) -> int:
-    root = repo_root()
-    srcs = sources(root)
-    created = 0
-    for source in srcs:
-        path = note_path(source)
-        if os.path.exists(os.path.join(root, path)):
-            continue
-        write_note(root, path, {"source": source}, skeleton_body())
-        created += 1
-
-    dirs = sorted({posixpath.dirname(s) for s in srcs})
-    for directory in dirs:
-        path = dir_note_path(directory)
-        if os.path.exists(os.path.join(root, path)):
-            continue
-        label = directory or "(repo root)"
-        body = (
-            f"\n# {label}\n\n## Role\n—\n\n## Why it's like this\n—\n\n"
-            "## Conventions\n—\n"
-        )
-        write_note(root, path, {"source_dir": directory or "."}, body)
-        created += 1
-
-    readme = os.path.join(root, MIRROR, "README.md")
-    if not os.path.exists(readme):
-        template = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "templates", "repo-readme.md",
-        )
-        if os.path.exists(template):
-            os.makedirs(os.path.dirname(readme), exist_ok=True)
-            with open(template, encoding="utf-8") as src, open(readme, "w", encoding="utf-8") as dst:
-                dst.write(src.read())
-            created += 1
-
-    gitignore = os.path.join(root, ".gitignore")
-    needed = [f"{MIRROR}/.dirty", f"{MIRROR}/.graph.json", f"{MIRROR}/.stop_state"]
-    existing = ""
-    if os.path.exists(gitignore):
-        with open(gitignore, encoding="utf-8") as handle:
-            existing = handle.read()
-    missing = [line for line in needed if line not in existing]
-    if missing:
-        with open(gitignore, "a", encoding="utf-8") as handle:
-            if existing and not existing.endswith("\n"):
-                handle.write("\n")
-            handle.write("\n".join(missing) + "\n")
-
-    print(f"scaffolded {created} notes for {len(srcs)} sources")
-    return 0
-
-
-def cmd_map(args) -> int:
-    root = repo_root()
-    srcs = sources(root)
-    graph = build_graph(root, srcs, force=set(args.paths or []))
-
+def rewrite_notes(root: str, prefix: str, srcs: list[str], graph: dict) -> int:
     changed = 0
     for source in srcs:
-        path = note_path(source)
+        path = note_path(source, prefix)
         parsed = read_note(root, path)
         if parsed is None:
-            meta, body = {"source": source}, skeleton_body()
+            meta, body = {"source": to_scope(source, prefix)}, skeleton_body()
         else:
             meta, body = parsed
-            meta.setdefault("source", source)
-
+            meta.setdefault("source", to_scope(source, prefix))
         before, _, after = split_generated(body)
         if not after and GEN_START not in body:
-            before, after = "\n", body if body.strip() else skeleton_body_tail()
-        new_body = f"{before}{GEN_START}{generated_block(source, graph)}{GEN_END}{after}"
+            before, after = "\n", "\n\n" + skeleton_tail()
+        new_body = f"{before}{GEN_START}{generated_block(source, graph, prefix)}{GEN_END}{after}"
         if write_note(root, path, meta, new_body):
             changed += 1
-
-    write_index(root, graph, srcs)
-    print(f"mapped {len(srcs)} sources, {changed} notes updated")
-    return 0
+    return changed
 
 
-def skeleton_body_tail() -> str:
-    return "\n\n" + "\n\n".join(f"## {name}\n—" for name in PROSE_SECTIONS) + "\n"
-
-
-def write_index(root: str, graph: dict, srcs: list[str]) -> None:
+def write_index(root: str, prefix: str, graph: dict, srcs: list[str]) -> None:
+    covered = set(srcs)
     symbols: dict[str, list[str]] = {}
     for source, names in graph["exports"].items():
         for name in names:
@@ -393,12 +404,17 @@ def write_index(root: str, graph: dict, srcs: list[str]) -> None:
         "Generated by `reminiscence map`. Resolves a symbol to the file that",
         "defines it, so \"where is X?\" is one Read instead of a repo-wide grep.",
         "",
+        "Paths are relative to this mirror's root. Entries marked `(outside scope)`",
+        "resolve to real files that have no note — read the source directly.",
+        "",
     ]
     for name in sorted(symbols):
         for source in sorted(symbols[name]):
-            lines.append(f"- `{name}` — {source}")
+            mark = "" if source in covered else "  (outside scope)"
+            lines.append(f"- `{name}` — {to_scope(source, prefix)}{mark}")
     lines.append("")
-    full = os.path.join(root, INDEX)
+
+    full = os.path.join(root, mirror_root(prefix), INDEX_NAME)
     os.makedirs(os.path.dirname(full), exist_ok=True)
     text = "\n".join(lines)
     if os.path.exists(full):
@@ -409,32 +425,38 @@ def write_index(root: str, graph: dict, srcs: list[str]) -> None:
         handle.write(text)
 
 
-def collect_notes(root: str) -> list[str]:
-    base = os.path.join(root, MIRROR)
+# --------------------------------------------------------------------------
+# audit
+# --------------------------------------------------------------------------
+
+def collect_notes(root: str, prefix: str) -> list[str]:
+    base = os.path.join(root, mirror_root(prefix))
+    skip = {INDEX_NAME, "README.md", "_dir.md"}
     out = []
     for dirpath, _dirs, files in os.walk(base):
         for name in files:
-            if not name.endswith(".md") or name == "_dir.md":
+            if not name.endswith(".md") or name in skip:
                 continue
             full = os.path.join(dirpath, name)
             out.append(os.path.relpath(full, root).replace(os.sep, "/"))
-    return sorted(p for p in out if p not in (INDEX, f"{MIRROR}/README.md"))
+    return sorted(out)
 
 
-def audit(root: str) -> dict[str, list[str]]:
-    srcs = sources(root)
-    have_notes = set()
+def audit(root: str, prefix: str) -> dict[str, list[str]]:
+    srcs = sources(root, prefix)
+    have = set()
     result = {"MISSING": [], "ORPHAN": [], "UNFILLED": [], "PROSE-STALE": []}
 
-    for path in collect_notes(root):
+    for path in collect_notes(root, prefix):
         parsed = read_note(root, path)
         if parsed is None:
             continue
         meta, _ = parsed
-        source = meta.get("source")
-        if not source:
+        scoped = meta.get("source")
+        if not scoped:
             continue
-        have_notes.add(source)
+        source = to_repo(scoped, prefix)
+        have.add(source)
         if not os.path.exists(os.path.join(root, source)):
             result["ORPHAN"].append(path)
             continue
@@ -444,15 +466,15 @@ def audit(root: str) -> dict[str, list[str]]:
         elif sha != blob_sha(root, source):
             result["PROSE-STALE"].append(source)
 
-    result["MISSING"] = [s for s in srcs if s not in have_notes]
+    result["MISSING"] = [s for s in srcs if s not in have]
     for key in result:
         result[key].sort()
     return result
 
 
-def lint(root: str) -> list[str]:
+def lint(root: str, prefix: str) -> list[str]:
     findings = []
-    for path in collect_notes(root):
+    for path in collect_notes(root, prefix):
         parsed = read_note(root, path)
         if parsed is None:
             continue
@@ -468,24 +490,110 @@ def lint(root: str) -> list[str]:
             if f"\n{opener}" in prose or prose.strip().startswith(opener):
                 findings.append(f"{path}: prose opens by restating code (\"{opener}...\")")
                 break
-        if exported and len(exported) > 1:
-            named = sum(1 for name in exported if name.lower() in prose)
-            if named == len(exported):
-                findings.append(f"{path}: prose re-lists every exported symbol")
+        if len(exported) > 1 and all(n.lower() in prose for n in exported):
+            findings.append(f"{path}: prose re-lists every exported symbol")
     return sorted(findings)
 
 
-def cmd_verify(args) -> int:
+# --------------------------------------------------------------------------
+# verbs
+# --------------------------------------------------------------------------
+
+def resolve(args) -> tuple[str, str]:
     root = repo_root()
-    result = audit(root)
-    findings = lint(root) if args.lint else []
+    return root, scope_prefix(root, getattr(args, "scope", None))
+
+
+def cmd_path(args) -> int:
+    root, prefix = resolve(args)
+    source = to_repo(args.source, prefix) if not args.source.startswith(prefix or "\0") else args.source
+    print(to_scope(note_path(source, prefix), prefix))
+    return 0
+
+
+def cmd_sources(args) -> int:
+    root, prefix = resolve(args)
+    for path in sources(root, prefix):
+        print(to_scope(path, prefix))
+    return 0
+
+
+def cmd_scaffold(args) -> int:
+    root = repo_root()
+    prefix = scope_prefix(root, args.scope if args.scope else os.getcwd())
+    srcs = sources(root, prefix)
+    created = 0
+
+    for source in srcs:
+        path = note_path(source, prefix)
+        if os.path.exists(os.path.join(root, path)):
+            continue
+        write_note(root, path, {"source": to_scope(source, prefix)}, skeleton_body())
+        created += 1
+
+    for directory in sorted({posixpath.dirname(to_scope(s, prefix)) for s in srcs}):
+        path = posixpath.join(mirror_root(prefix), directory, "_dir.md")
+        if os.path.exists(os.path.join(root, path)):
+            continue
+        label = directory or "(scope root)"
+        write_note(
+            root, path, {"source_dir": directory or "."},
+            f"\n# {label}\n\n## Role\n—\n\n## Why it's like this\n—\n\n## Conventions\n—\n",
+        )
+        created += 1
+
+    readme = os.path.join(root, mirror_root(prefix), "README.md")
+    template = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "templates", "repo-readme.md",
+    )
+    if not os.path.exists(readme) and os.path.exists(template):
+        os.makedirs(os.path.dirname(readme), exist_ok=True)
+        with open(template, encoding="utf-8") as src, open(readme, "w", encoding="utf-8") as dst:
+            dst.write(src.read())
+        created += 1
+
+    gitignore = os.path.join(root, ".gitignore")
+    # Only .dirty is per-scope; the graph cache and stop state are repo-wide
+    # and live under .git/, which needs no gitignore entry.
+    needed = [f"{mirror_root(prefix)}/.dirty"]
+    existing = ""
+    if os.path.exists(gitignore):
+        with open(gitignore, encoding="utf-8") as handle:
+            existing = handle.read()
+    missing = [line for line in needed if line not in existing]
+    if missing:
+        with open(gitignore, "a", encoding="utf-8") as handle:
+            if existing and not existing.endswith("\n"):
+                handle.write("\n")
+            handle.write("\n".join(missing) + "\n")
+
+    where = prefix or "(repo root)"
+    print(f"scaffolded {created} notes for {len(srcs)} sources, scope: {where}")
+    return 0
+
+
+def cmd_map(args) -> int:
+    root, prefix = resolve(args)
+    srcs = sources(root, prefix)
+    graph = build_graph(root, force={to_repo(p, prefix) for p in (args.paths or [])})
+    changed = rewrite_notes(root, prefix, srcs, graph)
+    write_index(root, prefix, graph, srcs)
+    print(f"mapped {len(srcs)} sources, {changed} notes updated, scope: {prefix or '(repo root)'}")
+    return 0
+
+
+def cmd_verify(args) -> int:
+    root, prefix = resolve(args)
+    result = audit(root, prefix)
+    findings = lint(root, prefix) if args.lint else []
 
     if args.json:
         print(json.dumps({**result, "LINT": findings}, indent=2))
     else:
         for key in ("MISSING", "ORPHAN", "PROSE-STALE", "UNFILLED"):
             for item in result[key]:
-                print(f"{key}\t{item}")
+                print(f"{key}\t{to_scope(item, prefix)}")
         for finding in findings:
             print(f"LINT\t{finding}")
 
@@ -494,134 +602,158 @@ def cmd_verify(args) -> int:
 
 
 def cmd_unfilled(args) -> int:
-    root = repo_root()
-    result = audit(root)
+    root, prefix = resolve(args)
+    result = audit(root, prefix)
     pending = result["UNFILLED"] + result["PROSE-STALE"]
     if not pending:
         return 0
 
-    graph = build_graph(root, sources(root))
+    graph = build_graph(root)
     ordered = topological(pending, graph)
     if args.dirs:
-        seen: dict[str, list[str]] = {}
+        grouped: dict[str, list[str]] = {}
         for source in ordered:
-            seen.setdefault(posixpath.dirname(source), []).append(source)
-        for directory, items in seen.items():
+            scoped = to_scope(source, prefix)
+            grouped.setdefault(posixpath.dirname(scoped), []).append(scoped)
+        for directory, items in grouped.items():
             print(f"{directory or '.'}\t{' '.join(items)}")
     else:
         for source in ordered:
-            print(source)
+            print(to_scope(source, prefix))
     return 0
 
 
 def topological(pending: list[str], graph: dict) -> list[str]:
-    """Dependencies first, so a note can reference its neighbours' notes.
+    """Dependencies first, so a note can reference its neighbours'.
 
-    Cycles are real in Python (see the fixtures), so this is a depth-ordering
-    with cycle-breaking rather than a strict topological sort.
+    Cycles are real in Python, so this is a depth-ordering with cycle-breaking
+    rather than a strict topological sort, which would simply fail.
     """
     target = set(pending)
     depth: dict[str, int] = {}
 
-    def resolve(node: str, stack: frozenset) -> int:
+    def walk(node: str, stack: frozenset) -> int:
         if node in depth:
             return depth[node]
         if node in stack:
             return 0
         deps = [d for d in graph["uses"].get(node, []) if d in target]
-        value = 1 + max((resolve(d, stack | {node}) for d in deps), default=-1)
-        depth[node] = value
-        return value
+        depth[node] = 1 + max((walk(d, stack | {node}) for d in deps), default=-1)
+        return depth[node]
 
     for node in pending:
-        resolve(node, frozenset())
+        walk(node, frozenset())
     return sorted(pending, key=lambda n: (depth.get(n, 0), n))
 
 
 def cmd_stamp(args) -> int:
-    root = repo_root()
+    root, prefix = resolve(args)
     stamped = []
-    for source in args.sources:
-        path = note_path(source)
+    for given in args.sources:
+        source = to_repo(given, prefix)
+        path = note_path(source, prefix)
         parsed = read_note(root, path)
         if parsed is None:
-            print(f"reminiscence: no note for {source}", file=sys.stderr)
+            print(f"reminiscence: no note for {given}", file=sys.stderr)
             continue
         meta, body = parsed
         sha = blob_sha(root, source)
         if sha is None:
-            print(f"reminiscence: cannot read {source}", file=sys.stderr)
+            print(f"reminiscence: cannot read {given}", file=sys.stderr)
             continue
-        meta["source"] = source
+        meta["source"] = to_scope(source, prefix)
         meta["source_sha"] = sha
         meta["filled_by"] = args.by
         meta["updated"] = date.today().isoformat()
         write_note(root, path, meta, body)
         stamped.append(source)
 
-    drop_dirty(root, stamped)
+    drop_dirty(root, prefix, stamped)
     print(f"stamped {len(stamped)} notes ({args.by})")
     return 0
 
 
-def drop_dirty(root: str, done: list[str]) -> None:
-    full = os.path.join(root, DIRTY)
+def drop_dirty(root: str, prefix: str, done: list[str]) -> None:
+    full = os.path.join(root, mirror_root(prefix), ".dirty")
     if not os.path.exists(full):
         return
     with open(full, encoding="utf-8") as handle:
-        remaining = [line.strip() for line in handle if line.strip() not in done and line.strip()]
+        remaining = {l.strip() for l in handle if l.strip()} - set(done)
     if remaining:
         with open(full, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(sorted(set(remaining))) + "\n")
+            handle.write("\n".join(sorted(remaining)) + "\n")
     else:
         os.remove(full)
 
 
 def cmd_dirty(args) -> int:
-    root = repo_root()
-    full = os.path.join(root, DIRTY)
+    root, prefix = resolve(args)
+    full = os.path.join(root, mirror_root(prefix), ".dirty")
     if not os.path.exists(full):
         return 0
     with open(full, encoding="utf-8") as handle:
         for line in sorted({l.strip() for l in handle if l.strip()}):
-            print(line)
+            print(to_scope(line, prefix))
     return 0
 
 
 def cmd_status(args) -> int:
     root = repo_root()
-    if not os.path.isdir(os.path.join(root, MIRROR)):
-        print("state: not initialised")
+    prefix = scope_prefix(root, getattr(args, "scope", None))
+    if not os.path.isdir(os.path.join(root, mirror_root(prefix))):
+        print(f"state: not initialised  (would scope to: {prefix or '(repo root)'})")
         print("run: reminiscence init")
         return 2
 
-    srcs = sources(root)
-    result = audit(root)
+    srcs = sources(root, prefix)
+    result = audit(root, prefix)
     notes = len(srcs) - len(result["MISSING"])
-    unfilled = len(result["UNFILLED"])
-    stale = len(result["PROSE-STALE"])
-    filled = notes - unfilled - stale
+    unfilled, stale = len(result["UNFILLED"]), len(result["PROSE-STALE"])
 
-    mapped = os.path.exists(os.path.join(root, GRAPH_CACHE))
+    print(f"scope       {prefix or '(repo root)'}")
     print(f"sources     {len(srcs)}")
     print(f"notes       {notes}" + (f"  ({len(result['MISSING'])} missing)" if result["MISSING"] else ""))
-    print(f"mapped      {'yes' if mapped else 'no'}")
-    print(f"filled      {filled}/{notes}" + (f"  ({stale} stale, {unfilled} never filled)" if stale or unfilled else ""))
+    print(f"mapped      {'yes' if os.path.exists(os.path.join(root, GRAPH_CACHE)) else 'no'}")
+    print(f"filled      {notes - unfilled - stale}/{notes}"
+          + (f"  ({stale} stale, {unfilled} never filled)" if stale or unfilled else ""))
     if result["ORPHAN"]:
         print(f"orphans     {len(result['ORPHAN'])}  (run: reminiscence prune)")
+
+    others = [p for p in other_mirrors(root) if p != prefix]
+    if others:
+        print(f"other scopes in this repo: {', '.join(o or '(repo root)' for o in others)}")
+    return 0
+
+
+def other_mirrors(root: str) -> list[str]:
+    found = []
+    for dirpath, dirs, _files in os.walk(root):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        if MIRROR in dirs:
+            rel = os.path.relpath(dirpath, root).replace(os.sep, "/")
+            found.append("" if rel == "." else rel)
+            dirs.remove(MIRROR)
+    return sorted(found)
+
+
+def cmd_scopes(args) -> int:
+    root = repo_root()
+    for prefix in other_mirrors(root):
+        print(prefix or "(repo root)")
     return 0
 
 
 def cmd_prune(args) -> int:
-    root = repo_root()
+    root, prefix = resolve(args)
     removed = 0
-    for path in collect_notes(root):
+    for path in collect_notes(root, prefix):
         parsed = read_note(root, path)
         if parsed is None:
             continue
         meta, _ = parsed
-        source = meta.get("source")
-        if source and not os.path.exists(os.path.join(root, source)):
+        scoped = meta.get("source")
+        if scoped and not os.path.exists(os.path.join(root, to_repo(scoped, prefix))):
             os.remove(os.path.join(root, path))
             removed += 1
     print(f"pruned {removed} orphan notes")
@@ -632,20 +764,27 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="reminiscence")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("path"); p.add_argument("source"); p.set_defaults(fn=cmd_path)
-    p = sub.add_parser("sources"); p.set_defaults(fn=cmd_sources)
-    p = sub.add_parser("scaffold"); p.set_defaults(fn=cmd_scaffold)
-    p = sub.add_parser("map"); p.add_argument("paths", nargs="*"); p.set_defaults(fn=cmd_map)
-    p = sub.add_parser("unfilled"); p.add_argument("--dirs", action="store_true"); p.set_defaults(fn=cmd_unfilled)
-    p = sub.add_parser("verify")
+    def add(name, **kw):
+        p = sub.add_parser(name, **kw)
+        p.add_argument("--scope", default=None,
+                       help="folder to operate on (default: nearest .reminiscence/ above cwd)")
+        return p
+
+    p = add("path"); p.add_argument("source"); p.set_defaults(fn=cmd_path)
+    p = add("sources"); p.set_defaults(fn=cmd_sources)
+    p = add("scaffold"); p.set_defaults(fn=cmd_scaffold)
+    p = add("map"); p.add_argument("paths", nargs="*"); p.set_defaults(fn=cmd_map)
+    p = add("unfilled"); p.add_argument("--dirs", action="store_true"); p.set_defaults(fn=cmd_unfilled)
+    p = add("verify")
     p.add_argument("--json", action="store_true"); p.add_argument("--lint", action="store_true")
     p.set_defaults(fn=cmd_verify)
-    p = sub.add_parser("stamp")
+    p = add("stamp")
     p.add_argument("sources", nargs="+"); p.add_argument("--by", default="main", choices=["main", "haiku"])
     p.set_defaults(fn=cmd_stamp)
-    p = sub.add_parser("dirty"); p.set_defaults(fn=cmd_dirty)
-    p = sub.add_parser("status"); p.set_defaults(fn=cmd_status)
-    p = sub.add_parser("prune"); p.set_defaults(fn=cmd_prune)
+    p = add("dirty"); p.set_defaults(fn=cmd_dirty)
+    p = add("status"); p.set_defaults(fn=cmd_status)
+    p = add("prune"); p.set_defaults(fn=cmd_prune)
+    p = sub.add_parser("scopes"); p.set_defaults(fn=cmd_scopes)
 
     args = parser.parse_args()
     return args.fn(args)

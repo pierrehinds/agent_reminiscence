@@ -1,6 +1,6 @@
 ---
 source: hooks/post_tool_use.py
-source_sha: 755e122c4fa5e2123b13a52dad120924da33986d
+source_sha: 0a957579d4ca2d302dcd373d60ea7fb74f6f6055
 filled_by: main
 updated: 2026-08-09
 ---
@@ -31,6 +31,9 @@ Records which sources were edited this turn. Pure append; the Stop hook does the
 ## Why it's like this
 Deliberately does not refresh notes. Code churns mid-task, so a per-edit
 refresh burns tokens on prose that goes stale again three edits later.
+
+Routes by `scope_for_path`, not cwd. One session sitting at a monorepo root can
+edit files belonging to several different mirrors in a single turn.
 
 ## Gotchas
 Silently ignores paths outside the repo and files whose extension is not in `SOURCE_EXTS`, so editing a README never enqueues work.

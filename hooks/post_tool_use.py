@@ -5,6 +5,9 @@ No model involvement and no note rewriting — just an append. Refreshing a note
 per edit would burn tokens on prose that goes stale again three edits later, so
 this only accumulates the work queue that the Stop hook drains.
 
+The queue is written into whichever mirror owns the file, not the session's cwd:
+one turn at a monorepo root can touch several scopes.
+
 Every failure path exits 0. A memory layer that can break someone's session is
 worse than one that occasionally misses a file.
 """
@@ -37,15 +40,16 @@ def main() -> int:
         return 0
     if rel.startswith("../"):
         return 0
-
     if os.path.splitext(rel)[1] not in rem.SOURCE_EXTS:
         return 0
-    if rem.ignored(rel, rem.load_ignores(root)):
+
+    prefix = rem.scope_for_path(root, rel)
+    if prefix is None:
         return 0
-    if not os.path.isdir(os.path.join(root, rem.MIRROR)):
+    if rem.ignored(rem.to_scope(rel, prefix), rem.load_ignores(root, prefix)):
         return 0
 
-    dirty = os.path.join(root, rem.DIRTY)
+    dirty = os.path.join(root, rem.mirror_root(prefix), ".dirty")
     existing = set()
     if os.path.exists(dirty):
         with open(dirty, encoding="utf-8") as handle:

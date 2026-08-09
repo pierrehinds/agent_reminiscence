@@ -1,6 +1,6 @@
 ---
 source: hooks/stop.py
-source_sha: d539865471622bae17d5d0b6c48fae81218ccaab
+source_sha: bd3cadfbae6e669f5d2776204c269cb76c39ec28
 filled_by: main
 updated: 2026-08-09
 ---
@@ -16,7 +16,7 @@ updated: 2026-08-09
 —
 
 ## Exports
-STATE, emit, main
+emit, main
 
 ## External
 __future__, json, os, sys
@@ -43,6 +43,10 @@ break someone's session is worse than one that occasionally misses a file.
 
 It re-maps every source, not just the dirty ones, because a dirty file's
 edits change its neighbours' back-edges.
+
+It walks every mirror in the repo, not one — a single turn can dirty several
+scopes, and each needs its own re-map and its own correctly-scoped `stamp`
+command in the block reason.
 
 The `stamp` command in the block reason is built with an absolute script path
 derived from `__file__`. The agent receiving it has cwd set to the target repo,

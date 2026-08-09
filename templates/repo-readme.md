@@ -9,6 +9,10 @@ src/app/routes/menu.py   ->   .reminiscence/src/app/routes/menu.py.md
 
 The path is computed, never searched. Before editing a file, read its note.
 
+All paths here are relative to this mirror's root — the folder containing
+`.reminiscence/`. An edge may point outside it (`../../libs/...`); that is a
+real file that simply has no note, so read the source directly.
+
 ## What a note is for
 
 Primarily **navigation**. The generated region carries pre-resolved links to the

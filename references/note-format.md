@@ -1,7 +1,12 @@
 # Note format
 
 Every note lives at `.reminiscence/<source path>.md` — the source path verbatim,
-plus `.md`. The `.md` suffix is not cosmetic: it keeps the mirror out of
+plus `.md`. **The source path is relative to that mirror's root**, i.e. the
+folder containing `.reminiscence/`. For a single-package repo that is the repo
+root, so paths read repo-relative; under a monorepo scope they are relative to
+the scoped package, and edges leaving it read `../../other/package/file.py`.
+
+The `.md` suffix is not cosmetic: it keeps the mirror out of
 `**/*.py` globs, so linters, type checkers and test collectors never try to
 parse a note as code. It also disambiguates `menu.py` from `menu.ts`.
 
@@ -59,10 +64,13 @@ pressure for no gain.
 
 | Field | Written by | Meaning |
 | --- | --- | --- |
-| `source` | `scaffold` | Repo-relative path this note documents. |
+| `source` | `scaffold` | Scope-relative path this note documents. |
 | `source_sha` | `stamp` | Git blob hash of the source at last prose fill. |
 | `filled_by` | `stamp` | `main` or `haiku` — provenance of the prose. |
 | `updated` | `stamp` | Date of last prose fill. |
+
+`source` is scope-relative, so it is directly usable by an agent whose working
+directory is the scope root.
 
 **Fill state derives entirely from `source_sha`**, with no separate bookkeeping:
 
@@ -101,6 +109,12 @@ hand-written prose leaves the prose byte-identical.
 `Used by` is the section that earns the design. Outbound imports are readable
 from the top of the file; "who calls this?" normally costs a repo-wide grep.
 Precomputing the inversion turns it into a `Read`.
+
+Edges are computed against the **whole repository**, never just the covered
+scope. An entry may therefore point outside the mirror — a real file with no
+note of its own. Read the source directly. Scoping the graph as well as the
+coverage would turn such an edge into a bare `External` entry, losing the link
+entirely.
 
 ## Directory notes
 
